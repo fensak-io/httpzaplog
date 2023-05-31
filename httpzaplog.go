@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/exp/slices"
 )
 
 type Options struct {
@@ -19,6 +21,9 @@ type Options struct {
 
 	// Concise determines Whether to log the entries in concise mode.
 	Concise bool
+
+	// SkipURLParams determines which get parameters shouldn't be logged.
+	SkipURLParams []string
 
 	// SkipHeaders determines which headers shouldn't be logged.
 	SkipHeaders []string
@@ -83,8 +88,9 @@ type requestLogger struct {
 
 func (l *requestLogger) NewLogEntry(r *http.Request) middleware.LogEntry {
 	entry := &RequestLoggerEntry{
-		concise:     l.Opts.Concise,
-		skipHeaders: l.Opts.SkipHeaders,
+		concise:       l.Opts.Concise,
+		skipURLParams: l.Opts.SkipURLParams,
+		skipHeaders:   l.Opts.SkipHeaders,
 	}
 	msg := fmt.Sprintf("Request: %s %s", r.Method, r.URL.Path)
 
@@ -96,10 +102,11 @@ func (l *requestLogger) NewLogEntry(r *http.Request) middleware.LogEntry {
 }
 
 type RequestLoggerEntry struct {
-	Logger      *zap.Logger
-	msg         string
-	concise     bool
-	skipHeaders []string
+	Logger        *zap.Logger
+	msg           string
+	concise       bool
+	skipURLParams []string
+	skipHeaders   []string
 }
 
 func (l *RequestLoggerEntry) Write(status, bytes int, header http.Header, elapsed time.Duration, extra interface{}) {
@@ -122,7 +129,7 @@ func (l *RequestLoggerEntry) Write(status, bytes int, header http.Header, elapse
 			responseLog["body"] = string(body)
 		}
 		if len(header) > 0 {
-			responseLog["header"] = headerLogField(header, l.skipHeaders)
+			responseLog["header"] = headerLogField(header, l.skipHeaders, l.skipURLParams)
 		}
 	}
 
@@ -146,7 +153,22 @@ func (l *requestLogger) requestLogFields(r *http.Request) zapcore.Field {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	requestURL := fmt.Sprintf("%s://%s%s", scheme, r.Host, r.RequestURI)
+
+	// Make sure to sanitize the get parameters in the request URL.
+	var requestURL string
+	parsed, err := url.Parse(r.RequestURI)
+	if err != nil {
+		requestURL = fmt.Sprintf("%s://%s%s", scheme, r.Host, r.URL.Path)
+	} else {
+		urlValues := parsed.Query()
+		for urlK := range urlValues {
+			if slices.Contains(l.Opts.SkipURLParams, urlK) {
+				urlValues.Set(urlK, "***")
+			}
+		}
+		parsed.RawQuery = urlValues.Encode()
+		requestURL = fmt.Sprintf("%s://%s%s", scheme, r.Host, parsed.String())
+	}
 
 	requestFields := map[string]interface{}{
 		"requestURL":    requestURL,
@@ -166,13 +188,13 @@ func (l *requestLogger) requestLogFields(r *http.Request) zapcore.Field {
 	requestFields["scheme"] = scheme
 
 	if len(r.Header) > 0 {
-		requestFields["header"] = headerLogField(r.Header, l.Opts.SkipHeaders)
+		requestFields["header"] = headerLogField(r.Header, l.Opts.SkipHeaders, l.Opts.SkipURLParams)
 	}
 
 	return zap.Any("httpRequest", requestFields)
 }
 
-func headerLogField(header http.Header, skipHeaders []string) map[string]string {
+func headerLogField(header http.Header, skipHeaders []string, skipURLParams []string) map[string]string {
 	headerField := map[string]string{}
 	for k, v := range header {
 		k = strings.ToLower(k)
@@ -187,12 +209,25 @@ func headerLogField(header http.Header, skipHeaders []string) map[string]string 
 		if k == "authorization" || k == "cookie" || k == "set-cookie" {
 			headerField[k] = "***"
 		}
-
-		for _, skip := range skipHeaders {
-			if k == skip {
+		if k == "location" {
+			// For location key, try to sanitize the URL parameters which may contain sensitive info, expecially with OIDC
+			parsed, err := url.Parse(headerField[k])
+			if err != nil {
 				headerField[k] = "***"
-				break
+			} else {
+				urlValues := parsed.Query()
+				for urlK := range urlValues {
+					if slices.Contains(skipURLParams, urlK) {
+						urlValues.Set(urlK, "***")
+					}
+				}
+				parsed.RawQuery = urlValues.Encode()
+				headerField[k] = parsed.String()
 			}
+		}
+
+		if slices.Contains(skipHeaders, k) {
+			headerField[k] = "***"
 		}
 	}
 	return headerField
