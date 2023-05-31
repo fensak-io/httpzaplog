@@ -28,6 +28,9 @@ type Options struct {
 	// SkipHeaders determines which headers shouldn't be logged.
 	SkipHeaders []string
 
+	// SkipPaths determines which paths shouldn't be logged.
+	SkipPaths []string
+
 	// ErrorMiddleware is a middleware that will be injected between the logger middleware and the Recoverer middleware.
 	// This allows you to customize the 500 error page in the case of a panic.
 	ErrorMiddleware func(http.Handler) http.Handler
@@ -59,8 +62,24 @@ func RequestLogger(opts *Options) func(next http.Handler) http.Handler {
 
 func Handler(opts *Options) func(next http.Handler) http.Handler {
 	var f middleware.LogFormatter = &requestLogger{opts}
+
+	skipPaths := map[string]struct{}{}
+	for _, path := range opts.SkipPaths {
+		skipPaths[path] = struct{}{}
+	}
+
 	return func(next http.Handler) http.Handler {
 		fn := func(w http.ResponseWriter, r *http.Request) {
+			// Skip the logger if the path is in the skip list
+			if len(skipPaths) > 0 {
+				_, skip := skipPaths[r.URL.Path]
+				if skip {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+
+			// Log the request
 			entry := f.NewLogEntry(r)
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 
