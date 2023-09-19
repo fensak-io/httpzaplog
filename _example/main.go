@@ -3,9 +3,9 @@ package main
 import (
 	"net/http"
 
-	httpzaplog "github.com/fensak-io/httpzaplog"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	httpzaplog "github.com/illumitacit/httpzaplog"
 	"go.uber.org/zap"
 )
 

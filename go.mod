@@ -1,4 +1,4 @@
-module github.com/fensak-io/httpzaplog
+module github.com/illumitacit/httpzaplog
 
 go 1.18
 
